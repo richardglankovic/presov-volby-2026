@@ -29,7 +29,7 @@
         <div id="map" aria-label="Mapa volebných okrskov mesta Prešov"></div>
         <div id="map-status" class="map-status" role="status"><span id="map-status-text">Načítavam mapu…</span><button id="retry-basemap" hidden>Skúsiť znova</button><button id="retry-results" hidden>Načítať znova</button></div>
         <div class="map-topline"><span class="coverage-chip"><span></span>66 z 66 okrskov</span><button id="reset-map" class="map-small-button" title="Zobraziť celé mesto">↗ Celé mesto</button></div>
-        <div class="map-bottom"><div id="legend" class="legend"></div><div class="map-options"><button id="point-toggle" aria-pressed="false">Adresné body</button><span class="approximation">Približné hranice okrskov <button id="map-info" aria-label="Prečo sú hranice približné?">i</button></span></div></div>
+        <div class="map-bottom"><div id="legend" class="legend"></div><div class="map-options"><button id="legend-toggle" class="legend-toggle" aria-expanded="false" aria-controls="legend">Legenda <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button><button id="point-toggle" aria-pressed="false">Adresné body</button></div></div>
       </div>
     </section>
     <aside class="results-panel" aria-labelledby="results-heading">
@@ -39,7 +39,10 @@
       <p id="results-subtitle" class="results-subtitle">Výsledky volieb primátora</p>
       <p id="winner-lead" class="winner-lead" hidden></p>
       <div id="address-notice" class="address-notice" hidden></div>
-      <div class="metrics"><div><span class="metric-label">VOLEBNÁ ÚČASŤ</span><strong id="turnout-value">—</strong><span id="turnout-count" class="metric-detail">Načítavam údaje</span></div><div><span class="metric-label">PLATNÉ HLASY</span><strong id="votes-value">—</strong><span class="metric-detail">vo voľbe primátora</span></div></div>
+      <div class="metrics" id="results-metrics"><div><span class="metric-label">VOLEBNÁ ÚČASŤ</span><strong id="turnout-value">—</strong><span id="turnout-count" class="metric-detail">Načítavam údaje</span></div><div><span class="metric-label">PLATNÉ HLASY</span><strong id="votes-value">—</strong><span class="metric-detail">vo voľbe primátora</span></div></div>
+      <section id="candidate-focus" class="candidate-focus" aria-live="polite" hidden></section>
+      <details id="candidate-comparison" class="candidate-comparison" hidden><summary>Všetci kandidáti v tomto okrsku</summary><div class="table-heading"><span>KANDIDÁT</span><span>PODIEL / HLASY</span></div><div id="comparison-results" class="candidate-results"></div></details>
+      <div id="candidate-rankings" aria-live="polite" hidden></div>
       <div class="table-heading" id="candidate-heading"><span>KANDIDÁT</span><span>PODIEL / HLASY</span></div>
       <div id="candidate-results" class="candidate-results" aria-live="polite"></div>
       <div id="turnout-results" class="turnout-results" aria-live="polite" hidden></div>

@@ -19,6 +19,21 @@ export function turnoutExtremes(precincts, count = 3) {
   };
 }
 
+export function candidateSupport(result, candidate) {
+  const votes = result?.votes?.[candidate];
+  const total = result?.validVotes;
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(votes) || votes < 0 || votes > total) return null;
+  return { votes, total, share: 100 * votes / total };
+}
+
+export function candidateExtremes(precincts, candidate, count = 3) {
+  const valid = precincts.map(p => ({ ...p, support: candidateSupport(p, candidate) })).filter(p => p.support);
+  return {
+    highest: [...valid].sort((a, b) => b.support.share - a.support.share || a.id - b.id).slice(0, count),
+    lowest: [...valid].sort((a, b) => a.support.share - b.support.share || a.id - b.id).slice(0, count),
+  };
+}
+
 export function winningMargin(result) {
   const votes = Object.entries(result?.votes ?? {});
   if (votes.length < 2 || votes.some(([id, n]) => !Number.isInteger(Number(id)) || !Number.isFinite(n) || n < 0)) return null;

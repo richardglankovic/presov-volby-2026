@@ -1,11 +1,46 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, UNKNOWN_COLOR } from '../site/core.js';
+import { candidateExtremes, candidateSupport, colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, UNKNOWN_COLOR } from '../site/core.js';
 const read = async name => JSON.parse(await readFile(new URL(`../site/data/${name}`, import.meta.url), 'utf8'));
 const results = await read('results.json');
 const addresses = await read('addresses.json');
 const audit = await read('audit.json');
+
+test('candidate extremes rank raw vote shares across differently sized precincts, including zero support', () => {
+  const source = [
+    { id: 1, validVotes: 1000, votes: { 3: 501 }, shares: { 3: 50 } },
+    { id: 2, validVotes: 100, votes: { 3: 51 }, shares: { 3: 50 } },
+    { id: 3, validVotes: 100, votes: { 3: 0 } },
+    { id: 4, validVotes: 10, votes: { 3: 5 } },
+    { id: 5, validVotes: 0, votes: { 3: 0 } },
+    { id: 6, validVotes: 10, votes: { 3: 11 } },
+    { id: 7, validVotes: 10, votes: {} },
+    { id: 8, validVotes: 20, votes: { 3: 10 } },
+  ];
+  const before = structuredClone(source);
+  const ranked = candidateExtremes(source, 3);
+  assert.deepEqual(ranked.highest.map(p => p.id), [2, 1, 4]);
+  assert.deepEqual(ranked.lowest.map(p => p.id), [3, 4, 8]);
+  assert.deepEqual(source, before);
+  assert.deepEqual(candidateExtremes(source, 99), { highest: [], lowest: [] });
+  assert.equal(candidateSupport(source[2], 3).share, 0);
+  for (const id of results.candidates.map(c => c.id)) {
+    const actual = candidateExtremes(results.precincts, id);
+    assert.equal(new Set([...actual.highest, ...actual.lowest].map(p => p.id)).size, 6);
+    assert.ok(actual.highest.every(p => actual.lowest.every(low => p.support.share >= low.support.share)));
+  }
+});
+
+test('candidate summaries and city benchmark use valid mayoral votes, independent of turnout and display rounding', () => {
+  const local = candidateSupport(results.precincts.find(p => p.id === 28), 3);
+  const city = candidateSupport(results.totals, 3);
+  assert.deepEqual(local, { votes: 60, total: 420, share: 100 * 60 / 420 });
+  assert.equal(city.share, 100 * 7187 / 29796);
+  assert.equal((local.share - city.share).toFixed(1), '-9.8');
+  assert.equal(candidateSupport({ validVotes: 0, votes: { 3: 0 } }, 3), null);
+  assert.equal(candidateSupport({ validVotes: 10, votes: { 3: -1 } }, 3), null);
+});
 
 test('turnout extremes use raw participation ratios, exclude undefined rates and break ties by precinct number', () => {
   const source = [

@@ -5,7 +5,7 @@
 An interactive, Slovak-language map of Prešov’s mayoral election on **24 October 2026**, designed for desktop and mobile. It covers **66 precincts, six candidates and 29,796 valid votes**.
 
 - **Precinct winners:** color identifies the winner; darker shades show a larger lead over the runner-up, on a shared 0–40 percentage-point scale.
-- **Candidate support:** explore each candidate’s vote share. The default relative scale highlights variation within the city; an optional fixed 0–100% scale allows comparison between candidates.
+- **Candidate support:** explore each candidate’s vote share and three strongest/weakest precincts, with a citywide benchmark and expandable local results. The default relative scale highlights variation within the city; an optional fixed 0–100% scale allows comparison between candidates.
 - **Turnout:** view participation by precinct and the three highest- and lowest-turnout precincts.
 
 Search for an address or select a precinct to see its results and polling location. Links preserve the view and selected precinct. Every result describes the **whole precinct**, never an individual address or household.

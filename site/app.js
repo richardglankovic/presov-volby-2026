@@ -1,4 +1,4 @@
-import { colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, WINNER_MARGIN_MAX, UNKNOWN_COLOR } from './core.js';
+import { candidateExtremes, candidateSupport, colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, WINNER_MARGIN_MAX, UNKNOWN_COLOR } from './core.js';
 import { createBasemapInstaller, prepareBasemap } from './basemap.js';
 import { assetURL, compatiblePage, fetchJSON, refreshForLatest, refreshIncompatiblePage, showStartupFailure } from './recovery.js';
 
@@ -16,6 +16,8 @@ let data, state, addresses = [], searchMatches = [], searchIndex = -1, selectedA
 let map, maplibre, popup, marker, polygons, unknown, boundary, installBasemap, hoveredId = null, mapReady = false, basemapFailed = false, basemapApplied = false, basemapLoading = false, basemapErrors = 0;
 let toastTimer, searchTimer, basemapWatchdog;
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const mobileLayout = matchMedia('(max-width:760px)');
+let mobileLegendOpen = false;
 
 async function json(path) {
   return fetchJSON(assetURL(path, APP_BASE, RELEASE));
@@ -46,14 +48,47 @@ function precinctColor(p) {
   return colorAt(state.view === 'turnout' ? p.turnout : p.shares[state.candidate], state.view === 'turnout' ? [0, 100] : currentDomain());
 }
 
+function rankingMarkup(sections, candidateId = null) {
+  return sections.map(([title, rows]) => `<section class="ranking-group"><h3>${title}</h3><ol class="ranking-list">${rows.map(p => {
+    const support = candidateId ? candidateSupport(p, candidateId) : null;
+    const note = !candidateId && p.note;
+    const counts = support ? `${integer(support.votes)} z ${integer(support.total)} platných hlasov` : `${integer(p.participated)} z ${integer(p.registered)} voličov`;
+    return `<li><button class="ranking-row${state.precinct === p.id ? ' is-selected' : ''}" data-ranked-precinct="${p.id}" aria-pressed="${state.precinct === p.id}"${note ? ` aria-describedby="turnout-note-${p.id}"` : ''}><span class="ranking-row-head"><strong>Okrsok ${p.id}${note ? '<sup aria-hidden="true">*</sup>' : ''}</strong><strong>${percent(support ? support.share : p.turnout)}</strong></span><span class="ranking-location">${escape(p.pollingPlace)}</span><span class="ranking-count">${counts}</span></button></li>`;
+  }).join('')}</ol></section>`).join('');
+}
+
 function renderTurnoutRanking() {
   const extremes = turnoutExtremes(data.precincts);
   const sections = [['Najvyššia účasť', extremes.highest], ['Najnižšia účasť', extremes.lowest]];
-  $('turnout-results').innerHTML = sections.map(([title, rows]) => `<section class="turnout-group"><h3>${title}</h3><ol class="turnout-list">${rows.map(p => `<li><button class="turnout-row${state.precinct === p.id ? ' is-selected' : ''}" data-turnout-precinct="${p.id}" aria-pressed="${state.precinct === p.id}"${p.note ? ` aria-describedby="turnout-note-${p.id}"` : ''}><span class="turnout-row-head"><strong>Okrsok ${p.id}${p.note ? '<sup aria-hidden="true">*</sup>' : ''}</strong><strong>${percent(p.turnout)}</strong></span><span class="turnout-location">${escape(p.pollingPlace)}</span><span class="turnout-count">${integer(p.participated)} z ${integer(p.registered)} voličov</span></button></li>`).join('')}</ol></section>`).join('');
+  $('turnout-results').innerHTML = rankingMarkup(sections);
   const notes = [...extremes.highest, ...extremes.lowest].filter(p => p.note);
   for (const p of new Map(notes.map(p => [p.id, p])).values()) {
     $('turnout-results').insertAdjacentHTML('beforeend', `<p class="turnout-context" id="turnout-note-${p.id}">* ${escape(p.note)}</p>`);
   }
+}
+
+function candidateRows(result) {
+  return rankCandidates(data.candidates, result).map(c => {
+    const share = result.shares[c.id];
+    const active = state.view === 'candidate' && state.candidate === c.id;
+    return `<div class="candidate-row${active ? ' is-active' : ''}"><div class="candidate-row-head"><button class="candidate-name" data-candidate="${c.id}" title="Zobraziť podporu kandidáta ${escape(c.name)}">${escape(c.name)}${result.winner === c.id ? '<span class="winner-tag">VÍŤAZ</span>' : ''}${result.tiedCandidates.includes(c.id) ? '<span class="winner-tag">REMÍZA</span>' : ''}</button><span class="candidate-numbers">${percent(share)}<small>${integer(result.votes[c.id])}</small></span></div><div class="candidate-track" aria-hidden="true"><div class="candidate-bar" style="width:${share ?? 0}%;background:${c.color}"></div></div></div>`;
+  }).join('');
+}
+
+function renderCandidateFocus(result, selected) {
+  const person = candidate(state.candidate);
+  const support = candidateSupport(result, person.id);
+  const city = candidateSupport(data.totals, person.id);
+  let benchmark = '';
+  if (selected && city) {
+    const difference = support ? support.share - city.share : null;
+    const comparison = difference === null ? 'Podiel v okrsku nemožno vypočítať.' : difference === 0 ? 'Rovnaký podiel ako v celom meste.' : Math.abs(difference) < .05 ? 'Rozdiel oproti mestu je menší než 0,1 p. b.' : `O ${points(Math.abs(difference))} ${difference > 0 ? 'viac' : 'menej'} než v celom meste.`;
+    benchmark = `<p class="candidate-benchmark">Prešov celkovo: ${percent(city.share)} · ${integer(city.votes)} hlasov<br><strong>${comparison}</strong></p>`;
+  }
+  $('candidate-focus').innerHTML = `<p class="eyebrow">PODPORA KANDIDÁTA</p><h3>${escape(person.name)}</h3><div class="candidate-focus-share">${percent(support?.share)}</div><p class="candidate-focus-count">${support ? `${integer(support.votes)} z ${integer(support.total)} platných hlasov` : 'Bez platných hlasov pre výpočet podielu.'}</p>${benchmark}`;
+  const extremes = candidateExtremes(data.precincts, person.id);
+  $('candidate-rankings').innerHTML = rankingMarkup([['Najsilnejšie okrsky', extremes.highest], ['Najslabšie okrsky', extremes.lowest]], person.id);
+  if (selected) $('comparison-results').innerHTML = candidateRows(result);
 }
 
 function renderResults() {
@@ -72,17 +107,22 @@ function renderResults() {
   $('turnout-count').textContent = `${integer(result.participated)} z ${integer(result.registered)} voličov`;
   $('votes-value').textContent = integer(result.validVotes);
   const turnoutView = state.view === 'turnout';
-  $('candidate-heading').hidden = turnoutView;
-  $('candidate-results').hidden = turnoutView;
+  const candidateView = state.view === 'candidate';
+  $('results-metrics').hidden = candidateView;
+  $('candidate-focus').hidden = !candidateView;
+  $('candidate-rankings').hidden = !candidateView;
+  $('candidate-comparison').hidden = !candidateView || !selected;
+  if (!candidateView || !selected || $('candidate-comparison').dataset.precinct !== String(selected.id)) $('candidate-comparison').open = false;
+  $('candidate-comparison').dataset.precinct = selected ? selected.id : '';
+  $('candidate-heading').hidden = state.view !== 'winner';
+  $('candidate-results').hidden = state.view !== 'winner';
   $('turnout-results').hidden = !turnoutView;
   if (turnoutView) renderTurnoutRanking();
-  else $('candidate-results').innerHTML = rankCandidates(data.candidates, result).map(c => {
-    const share = result.shares[c.id];
-    const active = state.view === 'candidate' && state.candidate === c.id;
-    return `<div class="candidate-row${active ? ' is-active' : ''}"><div class="candidate-row-head"><button class="candidate-name" data-candidate="${c.id}" title="Zobraziť podporu kandidáta ${escape(c.name)}">${escape(c.name)}${result.winner === c.id ? '<span class="winner-tag">VÍŤAZ</span>' : ''}${result.tiedCandidates.includes(c.id) ? '<span class="winner-tag">REMÍZA</span>' : ''}</button><span class="candidate-numbers">${percent(share)}<small>${integer(result.votes[c.id])}</small></span></div><div class="candidate-track" aria-hidden="true"><div class="candidate-bar" style="width:${share ?? 0}%;background:${c.color}"></div></div></div>`;
-  }).join('');
+  else if (candidateView) renderCandidateFocus(result, selected);
+  else $('candidate-results').innerHTML = candidateRows(result);
   $('precinct-explainer').textContent = turnoutView
     ? 'Rebríčky porovnávajú všetkých 66 okrskov v meste. Kliknutím na položku zobrazíte okrsok na mape. Účasť je podiel zúčastnených zo zapísaných voličov.'
+    : candidateView ? 'Rebríčky porovnávajú podiel kandidáta zo všetkých platných hlasov v každom okrsku. Kliknutím na položku zobrazíte okrsok na mape.'
     : selected ? `${selected.addressCount} priradených adresných bodov. Podiely kandidátov sú z ${integer(result.validVotes)} platných hlasov v celom okrsku.${selected.note ? ' ' + selected.note : ''}` : 'Kliknite na farebnú plochu alebo vyhľadajte adresu. Zistíte, ako volilo vaše susedstvo.';
   $('precinct-select').value = selected ? selected.id : '';
   if (selectedAddress) {
@@ -98,13 +138,19 @@ function renderLegend() {
   if (state.view === 'winner') {
     const ticks = [0, 10, 20, 30, WINNER_MARGIN_MAX];
     const winners = new Set(data.precincts.map(p => winningMargin(p)?.winnerId).filter(Boolean));
-    $('legend').innerHTML = `<div class="legend-title">Víťaz a náskok pred druhým</div><div class="winner-scale-label">Náskok v percentuálnych bodoch (p. b.)</div><div class="winner-legend-row winner-legend-axis"><span></span><span class="winner-legend-ticks">${ticks.map(n => `<span>${n}</span>`).join('')}</span></div>${data.candidates.filter(c => winners.has(c.id)).sort((a, b) => b.votes - a.votes).map(c => `<div class="winner-legend-row"><span>${escape(c.surname)}</span><span class="winner-legend-ramp" style="background:linear-gradient(90deg,${winnerMarginColor(c.color, 0)},${winnerMarginColor(c.color, 20)},${winnerMarginColor(c.color, WINNER_MARGIN_MAX)})"></span></div>`).join('')}<p class="winner-legend-note">Tmavšia farba znamená väčší náskok.<br>${state.points ? 'Sivá: objekt mimo volebného zoznamu alebo remíza.' : 'Sivá: remíza alebo bez platných hlasov.'}</p>`;
+    $('legend').innerHTML = `<div class="legend-title">Víťaz a náskok pred druhým</div><div class="winner-scale-label">Náskok v percentuálnych bodoch (p. b.)</div><div class="winner-legend-row winner-legend-axis"><span></span><span class="winner-legend-ticks">${ticks.map(n => `<span>${n}</span>`).join('')}</span></div>${data.candidates.filter(c => winners.has(c.id)).sort((a, b) => b.votes - a.votes).map(c => `<div class="winner-legend-row"><span>${escape(c.surname)}</span><span class="winner-legend-ramp" style="background:linear-gradient(90deg,${winnerMarginColor(c.color, 0)},${winnerMarginColor(c.color, 20)},${winnerMarginColor(c.color, WINNER_MARGIN_MAX)})"></span></div>`).join('')}<p class="winner-legend-note">Tmavšia farba znamená väčší náskok.${state.points ? '<br>Sivé body: objekty mimo volebného zoznamu adries.' : ''}</p>`;
   } else {
     const domain = state.view === 'turnout' ? [0, 100] : currentDomain();
     const ticks = [domain[0], (domain[0] + domain[1]) / 2, domain[1]];
     const relative = state.view === 'candidate' && state.relative;
     $('legend').innerHTML = `<div class="legend-title">${state.view === 'turnout' ? 'Volebná účasť v okrsku' : escape(candidate(state.candidate).name) + ' · podiel hlasov'}</div><div class="legend-gradient"></div><div class="legend-ticks">${ticks.map(t => `<span>${percent(t)}</span>`).join('')}</div><p class="legend-note">${relative ? 'Relatívna škála: od najslabšieho po najsilnejší okrsok tohto kandidáta.' : 'Spoločná škála 0–100 %. Tmavšia farba znamená vyšší podiel.'}${state.points ? '<br>Sivé body: objekty mimo volebného zoznamu adries.' : ''}</p>`;
   }
+}
+
+function syncLegendDisclosure() {
+  const expanded = !mobileLayout.matches || mobileLegendOpen;
+  $('legend').hidden = !expanded;
+  $('legend-toggle').setAttribute('aria-expanded', String(expanded));
 }
 
 function renderControls() {
@@ -331,19 +377,32 @@ function selectAddress(a, zoom = true) {
 function openMethod() { if (!$('method-dialog').open) $('method-dialog').showModal(); }
 
 function bindEvents() {
+  $('legend-toggle').addEventListener('click', () => { mobileLegendOpen = !mobileLegendOpen; syncLegendDisclosure(); });
+  $('legend-toggle').addEventListener('keydown', event => {
+    if (event.key === 'Escape' && mobileLegendOpen) { mobileLegendOpen = false; syncLegendDisclosure(); }
+  });
+  mobileLayout.addEventListener('change', syncLegendDisclosure);
+  syncLegendDisclosure();
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => { state.view = button.dataset.view; render(); }));
   $('candidate').addEventListener('change', event => { state.candidate = Number(event.target.value); render(); });
   $('absolute-scale').addEventListener('change', event => { state.relative = !event.target.checked; render(); });
   $('retry-basemap').addEventListener('click', loadBasemap);
   $('point-toggle').addEventListener('click', () => { state.points = !state.points; render(); if (state.points && !addresses.length) toast('Adresné body sa načítavajú…'); });
-  $('candidate-results').addEventListener('click', event => { const b = event.target.closest('[data-candidate]'); if (b) { state.view = 'candidate'; state.candidate = Number(b.dataset.candidate); render(); } });
-  $('turnout-results').addEventListener('click', event => {
-    const b = event.target.closest('[data-turnout-precinct]');
+  ['candidate-results', 'comparison-results'].forEach(id => $(id).addEventListener('click', event => {
+    const b = event.target.closest('[data-candidate]');
     if (!b) return;
-    const id = Number(b.dataset.turnoutPrecinct);
-    selectPrecinct(state.precinct === id ? null : id);
-    $('turnout-results').querySelector(`[data-turnout-precinct="${id}"]`).focus({ preventScroll: true });
-  });
+    state.view = 'candidate';
+    state.candidate = Number(b.dataset.candidate);
+    render();
+    if (id === 'comparison-results') $(id).querySelector(`[data-candidate="${state.candidate}"]`).focus({ preventScroll: true });
+  }));
+  ['turnout-results', 'candidate-rankings'].forEach(id => $(id).addEventListener('click', event => {
+    const b = event.target.closest('[data-ranked-precinct]');
+    if (!b) return;
+    const precinctId = Number(b.dataset.rankedPrecinct);
+    selectPrecinct(state.precinct === precinctId ? null : precinctId);
+    $(id).querySelector(`[data-ranked-precinct="${precinctId}"]`).focus({ preventScroll: true });
+  }));
   $('precinct-select').addEventListener('change', event => selectPrecinct(event.target.value, { mobileScroll: true }));
   $('clear-selection').addEventListener('click', () => selectPrecinct(null, { zoom: false }));
   $('reset-map').addEventListener('click', () => { selectPrecinct(null, { zoom: false }); $('address-search').value = ''; hideSearch(); fitBounds(data.bounds); });
@@ -368,7 +427,7 @@ function bindEvents() {
     try { await navigator.clipboard.writeText(location.href); toast('Odkaz na toto zobrazenie je skopírovaný.'); }
     catch { toast('Odkaz môžete skopírovať z adresného riadka prehliadača.'); }
   });
-  ['method-open', 'sources-open', 'map-info'].forEach(id => $(id).addEventListener('click', openMethod));
+  ['method-open', 'sources-open'].forEach(id => $(id).addEventListener('click', openMethod));
   $('method-close').addEventListener('click', () => $('method-dialog').close());
   $('method-dialog').addEventListener('click', event => { if (event.target === $('method-dialog') && (event.offsetX < 0 || event.offsetY < 0 || event.offsetX > event.target.clientWidth || event.offsetY > event.target.clientHeight)) $('method-dialog').close(); });
   window.addEventListener('popstate', () => { clearAddress(); state = parseState(location.search, data.candidates.map(c => c.id), data.precincts.map(p => p.id)); render(); });
@@ -401,7 +460,7 @@ async function start() {
     if (await refreshForLatest(RELEASE, APP_BASE, location)) return;
     showStartupFailure(data ? 'Stránku sa nepodarilo dokončiť načítať. Skúste načítať aktuálnu verziu.' : 'Výsledky sa nepodarilo načítať. Skontrolujte pripojenie a skúste znova.', APP_BASE);
     $('candidate-results').innerHTML = '<p>Výsledky momentálne nie sú dostupné. <a href="./data/results.json">Otvoriť zdrojové výsledky</a>.</p>';
-    ['method-open', 'sources-open', 'map-info'].forEach(id => $(id).onclick = openMethod);
+    ['method-open', 'sources-open'].forEach(id => $(id).onclick = openMethod);
     $('method-close').onclick = () => $('method-dialog').close();
   }
 }
