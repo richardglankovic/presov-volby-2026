@@ -1,0 +1,15 @@
+dennikn_clanok/
+vysledky/
+sources/
+.pythonlibs/
+__pycache__/
+*.pyc
+tmp/
+node_modules/
+dist/
+.DS_Store
+
+# Private local instructions, review history and publishing identity
+/AGENTS.md
+/VALIDATION.md
+/publish.local.json
