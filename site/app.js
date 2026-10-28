@@ -1,4 +1,5 @@
-import { candidateExtremes, candidateSupport, colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, WINNER_MARGIN_MAX, UNKNOWN_COLOR } from './core.js';
+import { candidateExtremes, candidateSupport, colorAt, domainFor, normalize, parseState, rankCandidates, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, WINNER_MARGIN_MAX, UNKNOWN_COLOR } from './core.js';
+import { assignedAddresses, pollingPlaces, searchLocations } from './search.js';
 import { createBasemapInstaller, prepareBasemap } from './basemap.js';
 import { assetURL, compatiblePage, fetchJSON, refreshForLatest, refreshIncompatiblePage, showStartupFailure } from './recovery.js';
 import { COUNCIL_PARTY_VIEW_ENABLED, councilDomain, councilQuery, councilValue, parseCouncilState, scopeSubjects, subjectResult } from './council-core.js';
@@ -15,8 +16,10 @@ const percent = n => Number.isFinite(n) ? `${percentFormat.format(n)} %` : '—'
 const points = n => Number.isFinite(n) ? `${percentFormat.format(n)} p. b.` : '—';
 const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 let data, state, addresses = [], searchMatches = [], searchIndex = -1, selectedAddress = null;
+let places = [], selectedPollingPlace = null, addressLoading = true, searchQuery = '';
 let map, maplibre, popup, marker, polygons, unknown, boundary, installBasemap, hoveredId = null, mapReady = false, basemapFailed = false, basemapApplied = false, basemapLoading = false, basemapErrors = 0;
 let toastTimer, searchTimer, basemapWatchdog;
+let resultsContext = null;
 let council, districtsGeo, districtLabels = [], mayorMemory, councilMemory, councilLoading = false, councilRetrySearch = null;
 const isCouncil = () => state?.election === 'council';
 const neutralCouncil = () => isCouncil() && !(state.view === 'candidate' && state.candidate || state.view === 'party' && state.subject);
@@ -166,9 +169,6 @@ function renderResults() {
     for (const id of ['results-metrics', 'candidate-focus', 'candidate-rankings', 'candidate-comparison', 'candidate-heading', 'candidate-results', 'turnout-results', 'winner-lead']) $(id).hidden = true;
     const panel = $('council-results');
     const key = `${state.view}:${state.district}:${state.precinct}`;
-    const context = `${key}:${state.candidate}:${state.subject}`;
-    if (panel.dataset.context !== context) document.querySelector('.results-panel').scrollTop = 0;
-    panel.dataset.context = context;
     const open = panel.dataset.comparisonKey === key ? panel.querySelector('details')?.open ?? true : true;
     const result = councilPanel(council, data, state, open);
     panel.innerHTML = result.html;
@@ -222,6 +222,16 @@ function renderResults() {
 }
 
 function renderAddressNotice() {
+  if (selectedPollingPlace) {
+    const place = selectedPollingPlace;
+    $('address-notice').hidden = false;
+    $('address-notice').classList.remove('outside-list');
+    const selected = place.precincts.includes(state.precinct);
+    $('address-notice').innerHTML = `<strong>Volebná miestnosť · ${escape(place.address)}</strong><br>${escape(place.name)}<br>${place.precincts.length === 1
+      ? `Táto volebná miestnosť slúži okrsku ${place.precincts[0]}. Nižšie sú výsledky celého okrsku.`
+      : `V tejto budove sa volí vo viacerých okrskoch. Vyberte okrsok.${selected ? ` Teraz sú zobrazené výsledky okrsku ${state.precinct}.` : ' Dovtedy zostávajú zobrazené pôvodné výsledky.'}<div class="polling-precinct-choices" role="group" aria-label="Okrsky v tejto volebnej miestnosti">${place.precincts.map(id => `<button data-polling-precinct="${id}" aria-pressed="${state.precinct === id}">Okrsok ${id}</button>`).join('')}</div>`}`;
+    return;
+  }
   if (selectedAddress) {
     const outsideList = !selectedAddress.precinct;
     $('address-notice').hidden = false;
@@ -236,12 +246,12 @@ function renderLegend() {
   if (state.view === 'winner') {
     const ticks = [0, 10, 20, 30, WINNER_MARGIN_MAX];
     const winners = new Set(data.precincts.map(p => winningMargin(p)?.winnerId).filter(Boolean));
-    $('legend').innerHTML = `<div class="legend-title">Víťaz a náskok pred druhým</div><div class="winner-scale-label">Náskok v percentuálnych bodoch (p. b.)</div><div class="winner-legend-row winner-legend-axis"><span></span><span class="winner-legend-ticks">${ticks.map(n => `<span>${n}</span>`).join('')}</span></div>${data.candidates.filter(c => winners.has(c.id)).sort((a, b) => b.votes - a.votes).map(c => `<div class="winner-legend-row"><span>${escape(c.surname)}</span><span class="winner-legend-ramp" style="background:linear-gradient(90deg,${winnerMarginColor(c.color, 0)},${winnerMarginColor(c.color, 20)},${winnerMarginColor(c.color, WINNER_MARGIN_MAX)})"></span></div>`).join('')}<p class="winner-legend-note">Tmavšia farba znamená väčší náskok.${state.points ? '<br>Sivé body: objekty mimo volebného zoznamu adries.' : ''}</p>`;
+    $('legend').innerHTML = `<div class="legend-title">Víťaz a náskok pred druhým</div><div class="winner-scale-label">Náskok v percentuálnych bodoch (p. b.)</div><div class="winner-legend-row winner-legend-axis"><span></span><span class="winner-legend-ticks">${ticks.map(n => `<span>${n}</span>`).join('')}</span></div>${data.candidates.filter(c => winners.has(c.id)).sort((a, b) => b.votes - a.votes).map(c => `<div class="winner-legend-row"><span>${escape(c.surname)}</span><span class="winner-legend-ramp" style="background:linear-gradient(90deg,${winnerMarginColor(c.color, 0)},${winnerMarginColor(c.color, 20)},${winnerMarginColor(c.color, WINNER_MARGIN_MAX)})"></span></div>`).join('')}<p class="winner-legend-note">Tmavšia farba znamená väčší náskok.</p>`;
   } else {
     const domain = state.view === 'turnout' ? [0, 100] : currentDomain();
     const ticks = [domain[0], (domain[0] + domain[1]) / 2, domain[1]];
     const relative = state.view === 'candidate' && state.relative;
-    $('legend').innerHTML = `<div class="legend-title">${state.view === 'turnout' ? 'Volebná účasť v okrsku' : escape(candidate(state.candidate).name) + ' · podiel hlasov'}</div><div class="legend-gradient"></div><div class="legend-ticks">${ticks.map(t => `<span>${percent(t)}</span>`).join('')}</div><p class="legend-note">${relative ? 'Relatívna škála: od najslabšieho po najsilnejší okrsok tohto kandidáta.' : 'Spoločná škála 0–100 %. Tmavšia farba znamená vyšší podiel.'}${state.points ? '<br>Sivé body: objekty mimo volebného zoznamu adries.' : ''}</p>`;
+    $('legend').innerHTML = `<div class="legend-title">${state.view === 'turnout' ? 'Volebná účasť v okrsku' : escape(candidate(state.candidate).name) + ' · podiel hlasov'}</div><div class="legend-gradient"></div><div class="legend-ticks">${ticks.map(t => `<span>${percent(t)}</span>`).join('')}</div><p class="legend-note">${relative ? 'Relatívna škála: od najslabšieho po najsilnejší okrsok tohto kandidáta.' : 'Spoločná škála 0–100 %. Tmavšia farba znamená vyšší podiel.'}</p>`;
   }
 }
 
@@ -297,11 +307,17 @@ function render() {
   renderLegend();
   recolorMap();
   writeURL();
+  const context = JSON.stringify([state.election, state.view, state.precinct, isCouncil() ? state.district : null,
+    state.view === 'candidate' ? state.candidate : null, isCouncil() && state.view === 'party' ? state.subject : null]);
+  // New results start at their heading; cosmetic updates keep the reading position.
+  if (context !== resultsContext) document.querySelector('.results-panel').scrollTop = 0;
+  resultsContext = context;
   requestAnimationFrame(() => map?.resize());
 }
 
 function clearAddress() {
   selectedAddress = null;
+  selectedPollingPlace = null;
   $('address-search').value = '';
   marker?.remove();
   marker = null;
@@ -377,9 +393,7 @@ function addDistrictLayers() {
 }
 
 function pointsData() {
-  // Draw source-backed assignments above co-located records outside the list.
-  const ordered = [...addresses.filter(a => !a.precinct), ...addresses.filter(a => a.precinct)];
-  return { type: 'FeatureCollection', features: ordered.map(a => ({ type: 'Feature', id: a.id, properties: { addressId: a.id, precinct: a.precinct }, geometry: { type: 'Point', coordinates: a.coordinates } })) };
+  return { type: 'FeatureCollection', features: assignedAddresses(addresses).map(a => ({ type: 'Feature', id: a.id, properties: { addressId: a.id, precinct: a.precinct }, geometry: { type: 'Point', coordinates: a.coordinates } })) };
 }
 
 function addLayers() {
@@ -536,21 +550,57 @@ async function loadBasemap() {
 }
 
 function hideSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = null;
   $('search-results').hidden = true;
   $('address-search').setAttribute('aria-expanded', 'false');
   $('address-search').removeAttribute('aria-activedescendant');
   searchIndex = -1;
 }
 
-function renderSearch() {
+function renderSearch({ preserveActive = false } = {}) {
   const query = $('address-search').value;
-  searchMatches = searchAddresses(addresses, query);
-  searchIndex = -1;
-  $('address-search').removeAttribute('aria-activedescendant');
+  const activeIndex = searchIndex;
+  const active = preserveActive && searchQuery === normalize(query) ? searchMatches[searchIndex] : null;
+  searchQuery = normalize(query);
+  searchMatches = searchLocations(addresses, places, query);
+  searchIndex = active ? searchMatches.findIndex(m => m.kind === active.kind && (m.kind === 'address' ? m.address.id === active.address.id : m.place.address === active.place.address)) : -1;
+  if (active && searchIndex < 0) {
+    // Keep the user's highlighted place even if new addresses fill the result limit.
+    searchIndex = Math.min(activeIndex, searchMatches.length);
+    searchMatches.splice(searchIndex, 0, active);
+    searchMatches = searchMatches.slice(0, 8);
+  }
+  if (searchIndex >= 0) $('address-search').setAttribute('aria-activedescendant', `address-option-${searchIndex}`);
+  else $('address-search').removeAttribute('aria-activedescendant');
   const show = normalize(query).length >= 2;
   $('search-results').hidden = !show;
   $('address-search').setAttribute('aria-expanded', String(show));
-  $('search-results').innerHTML = searchMatches.length ? searchMatches.map((a, i) => `<li id="address-option-${i}" role="option" aria-selected="false" data-address-index="${i}"><span>${escape(a.label)}</span><small>${a.precinct ? 'okrsok ' + a.precinct : a.number ? 'mimo volebného zoznamu' : 'registračný záznam'}</small></li>`).join('') : `<li class="no-result" role="presentation">${addresses.length ? 'Adresa sa nenašla. Skúste názov ulice bez čísla.' : 'Adresy sa ešte načítavajú…'}</li>`;
+  $('search-results').innerHTML = searchMatches.length ? searchMatches.map((match, i) => {
+    const place = match.place, a = match.address;
+    const detail = place ? `Volebná miestnosť · ${place.precincts.length === 1 ? 'okrsok' : 'okrsky'} ${place.precincts.join(', ')}`
+      : a.precinct ? `Adresa · okrsok ${a.precinct}` : a.number ? 'Objekt mimo volebného zoznamu' : 'Registračný záznam';
+    return `<li id="address-option-${i}" role="option" aria-selected="${i === searchIndex}" data-address-index="${i}"><span class="search-match"><span>${escape(match.label)}</span><small>${detail}</small>${place ? `<small class="search-place-name">${escape(place.name)}</small>` : ''}</span></li>`;
+  }).join('') : `<li class="no-result" role="presentation">${addressLoading ? 'Adresy sa ešte načítavajú. Skúste aj názov volebnej miestnosti.' : addresses.length ? 'Nič sa nenašlo. Skúste názov ulice alebo volebnej miestnosti.' : 'Vyhľadávanie adries nie je dostupné. Skúste volebnú miestnosť.'}</li>`;
+  if (searchIndex >= 0) $(`address-option-${searchIndex}`).scrollIntoView({ block: 'nearest' });
+}
+
+function selectSearchMatch(match) {
+  if (match.kind === 'address') { selectAddress(match.address); return; }
+  clearAddress();
+  selectedPollingPlace = match.place;
+  $('address-search').value = match.place.address;
+  hideSearch();
+  if (match.place.precincts.length === 1) selectPrecinct(match.place.precincts[0], { zoom: false, keepAddress: true, mobileScroll: true });
+  else {
+    render();
+    $('address-notice').querySelector('[data-polling-precinct]')?.focus({ preventScroll: !mobileLayout.matches });
+  }
+  document.querySelector('.results-panel').scrollTop = 0;
+  if (map) {
+    marker = new maplibre.Marker({ color: '#203747' }).setLngLat(match.place.coordinates).addTo(map);
+    map.flyTo({ center: match.place.coordinates, zoom: 16, padding: { bottom: 100 }, duration: reducedMotion ? 0 : 800 });
+  }
 }
 
 function selectAddress(a, zoom = true) {
@@ -559,6 +609,7 @@ function selectAddress(a, zoom = true) {
   $('address-search').value = a.label;
   hideSearch();
   selectPrecinct(a.precinct, { zoom: false, keepAddress: true, mobileScroll: true });
+  document.querySelector('.results-panel').scrollTop = 0;
   if (map) {
     marker = new maplibre.Marker({ color: a.precinct ? '#203747' : '#7b878c' }).setLngLat(a.coordinates).addTo(map);
     if (zoom) map.flyTo({ center: a.coordinates, zoom: 16, padding: { bottom: 100 }, duration: reducedMotion ? 0 : 800 });
@@ -568,6 +619,13 @@ function selectAddress(a, zoom = true) {
 function openMethod() { if (!$('method-dialog').open) $('method-dialog').showModal(); }
 
 function bindEvents() {
+  $('address-notice').addEventListener('click', event => {
+    const button = event.target.closest('[data-polling-precinct]');
+    const id = Number(button?.dataset.pollingPrecinct);
+    if (!selectedPollingPlace?.precincts.includes(id)) return;
+    selectPrecinct(id, { zoom: false, keepAddress: true, mobileScroll: true });
+    $('results-heading').focus({ preventScroll: !mobileLayout.matches });
+  });
   document.querySelectorAll('[data-election]').forEach(button => button.addEventListener('click', () => {
     if (button.dataset.election !== (isCouncil() ? 'council' : 'mayor')) switchElection(button.dataset.election);
   }));
@@ -633,7 +691,7 @@ function bindEvents() {
   $('address-search').addEventListener('keydown', event => {
     if (event.key === 'Escape') { hideSearch(); return; }
     if (searchTimer && ['Enter', 'ArrowDown', 'ArrowUp'].includes(event.key)) { clearTimeout(searchTimer); searchTimer = null; renderSearch(); }
-    if (event.key === 'Enter' && searchMatches.length && !$('search-results').hidden) { event.preventDefault(); selectAddress(searchMatches[Math.max(0, searchIndex)]); return; }
+    if (event.key === 'Enter' && searchMatches.length && !$('search-results').hidden) { event.preventDefault(); selectSearchMatch(searchMatches[Math.max(0, searchIndex)]); return; }
     if (!['ArrowDown', 'ArrowUp'].includes(event.key) || !searchMatches.length) return;
     event.preventDefault();
     searchIndex = (searchIndex + (event.key === 'ArrowDown' ? 1 : -1) + searchMatches.length) % searchMatches.length;
@@ -641,8 +699,9 @@ function bindEvents() {
     $('address-search').setAttribute('aria-expanded', 'true');
     $('address-search').setAttribute('aria-activedescendant', `address-option-${searchIndex}`);
     document.querySelectorAll('[data-address-index]').forEach((el, i) => el.setAttribute('aria-selected', String(i === searchIndex)));
+    $(`address-option-${searchIndex}`).scrollIntoView({ block: 'nearest' });
   });
-  $('search-results').addEventListener('click', event => { const li = event.target.closest('[data-address-index]'); if (li) selectAddress(searchMatches[Number(li.dataset.addressIndex)]); });
+  $('search-results').addEventListener('click', event => { const li = event.target.closest('[data-address-index]'); if (li) selectSearchMatch(searchMatches[Number(li.dataset.addressIndex)]); });
   document.addEventListener('click', event => { if (!event.target.closest('.search-wrap')) hideSearch(); });
   $('share').addEventListener('click', async () => {
     writeURL();
@@ -668,6 +727,7 @@ async function start() {
   }
   try {
     data = await json('./data/results.json');
+    places = pollingPlaces(data.precincts);
     state = parseState(location.search, data.candidates.map(c => c.id), data.precincts.map(p => p.id));
     state.election = 'mayor';
     const initialCouncilSearch = new URLSearchParams(location.search).get('election') === 'council' ? location.search : null;
@@ -677,17 +737,25 @@ async function start() {
     }
     $('candidate').innerHTML = [...data.candidates].sort((a, b) => b.votes - a.votes).map(c => `<option value="${c.id}">${escape(c.name)}</option>`).join('');
     $('precinct-select').insertAdjacentHTML('beforeend', data.precincts.map(p => `<option value="${p.id}">Okrsok ${p.id}</option>`).join(''));
-    $('audit-summary').textContent = 'Vyhľadávanie používa priradenia z mestských údajov a oficiálneho zoznamu volebných adries. Register obsahuje aj školy, športoviská, obchody a ďalšie objekty bez samostatnej položky v tomto zozname. Ich areály sú zahrnuté do súvislých farebných plôch; nejde o chýbajúce výsledky okrskov.';
+    $('audit-summary').textContent = 'Adresy vo vyhľadávaní a na mape majú overené priradenie k okrsku z mestských údajov a oficiálneho zoznamu volebných adries. Volebné miestnosti sa vyhľadávajú aj samostatne podľa oficiálneho zoznamu.';
     $('snapshot-date').textContent = `Snímka zdrojových údajov: ${data.snapshotDate}. Nezávislý informačný projekt; nejde o oficiálnu volebnú aplikáciu mesta.`;
     bindEvents();
     render();
     if (state.corrected) { toast('Neplatnú kombináciu v odkaze sme upravili. Vyberte obvod a kandidáta znova.'); state.corrected = false; }
     startMap();
     json('./data/addresses.json').then(records => {
+      addressLoading = false;
       addresses = records.map(a => ({ ...a, searchKey: normalize(a.label) }));
       if (mapReady && map.getSource('addresses')) map.getSource('addresses').setData(pointsData());
-      if (!$('search-results').hidden) renderSearch();
-    }).catch(async error => { console.error('Address data:', error); if (await refreshForLatest(RELEASE, APP_BASE, location)) return; $('address-search').placeholder = 'Adresy sa nepodarilo načítať'; $('address-search').disabled = true; toast('Vyhľadávanie adries nie je dostupné. Okrsky môžete vyberať zo zoznamu.'); });
+      if (!$('search-results').hidden) renderSearch({ preserveActive: true });
+    }).catch(async error => {
+      addressLoading = false;
+      console.error('Address data:', error);
+      if (await refreshForLatest(RELEASE, APP_BASE, location)) return;
+      $('address-search').placeholder = 'Vyhľadať volebnú miestnosť…';
+      toast('Adresy sa nepodarilo načítať. Vyhľadávanie volebných miestností zostáva dostupné.');
+      if (!$('search-results').hidden) renderSearch({ preserveActive: true });
+    });
   } catch (error) {
     console.error('Application initialization:', error);
     if (await refreshForLatest(RELEASE, APP_BASE, location)) return;

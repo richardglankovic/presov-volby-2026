@@ -24,6 +24,10 @@ Mayoral views cover **29,796 valid votes**:
 
 Search for an address or select a precinct to see its results and polling location. Links preserve the view and selected precinct. Every result describes the **whole precinct**, never an individual address or household.
 
+The same search also finds official polling places by name or address. These matches are labelled separately from residential addresses. Shared locations offer their precincts to choose from and keep the current results until a choice is made. Polling-place lookup works independently of the address-register download.
+
+Public address suggestions and map points show only addresses assigned to a precinct. Unassigned registry objects remain in the data snapshot for auditing. Official polling places remain searchable independently of registry assignments.
+
 ## Run locally
 
 Requires **Node.js 22 or newer**. Prepared data are included; Python is only needed to rebuild them.

@@ -35,6 +35,14 @@ createServer(async (req, res) => {
       res.end(html);
       return;
     }
+    if (name === '/__qa/address-data-error' || name === '/__qa/delayed-addresses') {
+      const fail = name.endsWith('address-data-error');
+      const shim = `<script>{const originalFetch=window.fetch.bind(window);window.fetch=async(input,options)=>{if(String(input).includes('/addresses.json')){if(${fail})throw new TypeError('Local QA address failure');await new Promise(resolve=>setTimeout(resolve,5000));}return originalFetch(input,options);};}</script>`;
+      const html = (await readFile(resolve(root, 'index.html'), 'utf8')).replace('<head>', '<head><base href="/">' + shim);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(html);
+      return;
+    }
     if (name === '/__qa/no-basemap') {
       const html = (await readFile(resolve(root, 'index.html'), 'utf8')).replace('<head>', '<head><base href="/">');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "connect-src 'self'" });
