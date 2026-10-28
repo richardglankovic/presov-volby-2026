@@ -111,9 +111,12 @@ function renderResults() {
   $('results-metrics').hidden = candidateView;
   $('candidate-focus').hidden = !candidateView;
   $('candidate-rankings').hidden = !candidateView;
-  $('candidate-comparison').hidden = !candidateView || !selected;
-  if (!candidateView || !selected || $('candidate-comparison').dataset.precinct !== String(selected.id)) $('candidate-comparison').open = false;
-  $('candidate-comparison').dataset.precinct = selected ? selected.id : '';
+  const comparison = $('candidate-comparison');
+  const showComparison = candidateView && Boolean(selected);
+  comparison.hidden = !showComparison;
+  if (!showComparison) comparison.open = false;
+  else if (comparison.dataset.precinct !== String(selected.id)) comparison.open = true;
+  comparison.dataset.precinct = showComparison ? String(selected.id) : '';
   $('candidate-heading').hidden = state.view !== 'winner';
   $('candidate-results').hidden = state.view !== 'winner';
   $('turnout-results').hidden = !turnoutView;
