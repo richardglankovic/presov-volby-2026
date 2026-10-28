@@ -1,6 +1,8 @@
 import { candidateExtremes, candidateSupport, colorAt, domainFor, normalize, parseState, rankCandidates, searchAddresses, stateQuery, turnoutExtremes, winningMargin, winnerMarginColor, WINNER_MARGIN_MAX, UNKNOWN_COLOR } from './core.js';
 import { createBasemapInstaller, prepareBasemap } from './basemap.js';
 import { assetURL, compatiblePage, fetchJSON, refreshForLatest, refreshIncompatiblePage, showStartupFailure } from './recovery.js';
+import { COUNCIL_PARTY_VIEW_ENABLED, councilDomain, councilQuery, councilValue, parseCouncilState, scopeSubjects, subjectResult } from './council-core.js';
+import { councilLegend, councilPanel } from './council-ui.js';
 
 const RELEASE = typeof __APP_RELEASE__ === 'undefined' ? null : __APP_RELEASE__;
 const APP_BASE = new URL('./', import.meta.url).href;
@@ -15,12 +17,70 @@ const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', 
 let data, state, addresses = [], searchMatches = [], searchIndex = -1, selectedAddress = null;
 let map, maplibre, popup, marker, polygons, unknown, boundary, installBasemap, hoveredId = null, mapReady = false, basemapFailed = false, basemapApplied = false, basemapLoading = false, basemapErrors = 0;
 let toastTimer, searchTimer, basemapWatchdog;
+let council, districtsGeo, districtLabels = [], mayorMemory, councilMemory, councilLoading = false, councilRetrySearch = null;
+const isCouncil = () => state?.election === 'council';
+const neutralCouncil = () => isCouncil() && !(state.view === 'candidate' && state.candidate || state.view === 'party' && state.subject);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const mobileLayout = matchMedia('(max-width:760px)');
 let mobileLegendOpen = false;
 
 async function json(path) {
   return fetchJSON(assetURL(path, APP_BASE, RELEASE));
+}
+
+async function loadCouncil() {
+  if (council) return;
+  const [results, geography] = await Promise.all([json('./data/council-results.json'), json('./data/districts.geojson')]);
+  if (results.schemaVersion !== 1 || results.municipality !== '524140' || results.districts?.length !== 6 || geography.features?.length !== 6) throw new Error('Invalid council snapshot');
+  council = results;
+  districtsGeo = geography;
+  if (mapReady) addDistrictLayers();
+}
+
+async function switchElection(election, search = null) {
+  if (election === 'council' && councilLoading) return;
+  if (election === 'council') {
+    councilLoading = true;
+    const button = document.querySelector('[data-election="council"]');
+    button.disabled = true;
+    button.textContent = 'Načítavam…';
+    try { await loadCouncil(); }
+    catch (error) {
+      console.error('Council data:', error);
+      if (await refreshForLatest(RELEASE, APP_BASE, location)) return;
+      councilRetrySearch = search;
+      $('council-error').hidden = false;
+      return;
+    } finally { councilLoading = false; button.disabled = false; button.textContent = 'Poslanci'; }
+  }
+  const wasCouncil = isCouncil();
+  if (wasCouncil) councilMemory = { ...state }; else mayorMemory = { ...state };
+  const selectedPrecinct = state.precinct;
+  const points = state.points;
+  if (election === 'council') {
+    state = search !== null ? parseCouncilState(search, council) : { ...(councilMemory ?? parseCouncilState('', council)), precinct: selectedPrecinct, points };
+    if (selectedPrecinct && search === null) {
+      state.district = precinct(selectedPrecinct).district;
+      if (state.candidate && !state.candidate.startsWith(state.district + ':')) state.candidate = null;
+    }
+    if (state.corrected) { toast('Neplatnú kombináciu v odkaze sme upravili. Vyberte obvod a kandidáta znova.'); state.corrected = false; }
+  } else state = { ...(mayorMemory ?? parseState('', data.candidates.map(c => c.id), data.precincts.map(p => p.id))), election: 'mayor', precinct: selectedPrecinct, points };
+  $('council-error').hidden = true;
+  render();
+}
+
+function selectDistrict(id, { zoom = true } = {}) {
+  clearAddress();
+  state.district = council.districts.some(d => d.id === Number(id)) ? Number(id) : null;
+  state.precinct = null;
+  if (state.candidate && !state.candidate.startsWith(state.district + ':')) state.candidate = null;
+  render();
+  if (zoom) fitBounds(state.district ? districtBounds(state.district) : data.bounds);
+}
+
+function districtBounds(id) {
+  const bounds = data.precincts.filter(p => p.district === id).map(p => p.bounds);
+  return bounds.length ? [Math.min(...bounds.map(b => b[0])), Math.min(...bounds.map(b => b[1])), Math.max(...bounds.map(b => b[2])), Math.max(...bounds.map(b => b[3]))] : data.bounds;
 }
 
 function toast(message) {
@@ -31,7 +91,7 @@ function toast(message) {
 }
 
 function writeURL() {
-  const query = stateQuery(state);
+  const query = isCouncil() ? councilQuery(state, council) : stateQuery(state);
   history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
 }
 
@@ -41,6 +101,13 @@ function currentDomain() { return domainFor(data.precincts, state.candidate, sta
 
 function precinctColor(p) {
   if (!p) return UNKNOWN_COLOR;
+  if (isCouncil()) {
+    if (state.district && p.district !== state.district) return '#e2e6e3';
+    if (neutralCouncil()) return '#c8d2d1';
+    const result = council.precincts.find(r => r.id === p.id);
+    if (state.view === 'party' && !subjectResult(council, result, state.subject).nominees) return '#d2d5cf';
+    return colorAt(councilValue(council, state, result), councilDomain(council, state));
+  }
   if (state.view === 'winner') {
     const margin = winningMargin(p);
     return margin?.winnerId ? winnerMarginColor(candidate(margin.winnerId)?.color, margin.points) : UNKNOWN_COLOR;
@@ -92,6 +159,29 @@ function renderCandidateFocus(result, selected) {
 }
 
 function renderResults() {
+  $('council-results').hidden = !isCouncil();
+  $('clear-district').hidden = !isCouncil() || !state.district;
+  $('clear-selection').textContent = isCouncil() ? '← Celý obvod' : '← Celý Prešov';
+  if (isCouncil()) {
+    for (const id of ['results-metrics', 'candidate-focus', 'candidate-rankings', 'candidate-comparison', 'candidate-heading', 'candidate-results', 'turnout-results', 'winner-lead']) $(id).hidden = true;
+    const panel = $('council-results');
+    const key = `${state.view}:${state.district}:${state.precinct}`;
+    const context = `${key}:${state.candidate}:${state.subject}`;
+    if (panel.dataset.context !== context) document.querySelector('.results-panel').scrollTop = 0;
+    panel.dataset.context = context;
+    const open = panel.dataset.comparisonKey === key ? panel.querySelector('details')?.open ?? true : true;
+    const result = councilPanel(council, data, state, open);
+    panel.innerHTML = result.html;
+    panel.dataset.comparisonKey = key;
+    $('results-heading').textContent = result.title;
+    $('results-kicker').textContent = result.kicker;
+    $('results-subtitle').textContent = result.subtitle;
+    $('clear-selection').hidden = !state.precinct;
+    $('precinct-explainer').textContent = 'Výsledky opisujú celý okrsok. Zvolení poslanci sa určujú za celý volebný obvod, nie za jednotlivé okrsky.';
+    renderAddressNotice();
+    return;
+  }
+  $('council-results').dataset.comparisonKey = '';
   const selected = precinct(state.precinct);
   const result = selected ?? data.totals;
   $('results-kicker').textContent = selected ? `VOLEBNÝ OBVOD ${selected.district} / ${data.districts[selected.district].toLocaleUpperCase('sk')}` : 'CELÉ MESTO';
@@ -128,16 +218,21 @@ function renderResults() {
     : candidateView ? 'Rebríčky porovnávajú podiel kandidáta zo všetkých platných hlasov v každom okrsku. Kliknutím na položku zobrazíte okrsok na mape.'
     : selected ? `${selected.addressCount} priradených adresných bodov. Podiely kandidátov sú z ${integer(result.validVotes)} platných hlasov v celom okrsku.${selected.note ? ' ' + selected.note : ''}` : 'Kliknite na farebnú plochu alebo vyhľadajte adresu. Zistíte, ako volilo vaše susedstvo.';
   $('precinct-select').value = selected ? selected.id : '';
+  renderAddressNotice();
+}
+
+function renderAddressNotice() {
   if (selectedAddress) {
     const outsideList = !selectedAddress.precinct;
     $('address-notice').hidden = false;
     $('address-notice').classList.toggle('outside-list', outsideList);
     const objectNote = selectedAddress.number ? 'Objekt nie je samostatne uvedený vo volebnom zozname adries. Register obsahuje aj školy, športoviská a prevádzky.' : 'Tento registračný záznam má iba súpisné číslo, bez orientačného čísla. Nejde o označenie celej ulice.';
-    $('address-notice').innerHTML = `<strong>${escape(selectedAddress.label)}</strong><br>${outsideList ? objectNote + ' Výsledky okolia zobrazíte kliknutím na farebnú plochu; teraz sú zobrazené výsledky za celé mesto.' : `Adresa patrí do okrsku ${selectedAddress.precinct}. Nižšie sú výsledky celého okrsku.`}`;
+    $('address-notice').innerHTML = `<strong>${escape(selectedAddress.label)}</strong><br>${outsideList ? objectNote + ' Výsledky okolia zobrazíte výberom obvodu alebo okrsku.' : `Adresa patrí do okrsku ${selectedAddress.precinct}. Nižšie sú výsledky celého okrsku.`}`;
   } else $('address-notice').hidden = true;
 }
 
 function renderLegend() {
+  if (isCouncil()) { $('legend').innerHTML = councilLegend(council, state); return; }
   if (state.view === 'winner') {
     const ticks = [0, 10, 20, 30, WINNER_MARGIN_MAX];
     const winners = new Set(data.precincts.map(p => winningMargin(p)?.winnerId).filter(Boolean));
@@ -157,6 +252,38 @@ function syncLegendDisclosure() {
 }
 
 function renderControls() {
+  const councilMode = isCouncil();
+  document.body.classList.toggle('council-mode', councilMode);
+  document.querySelectorAll('[data-election]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.election === (councilMode ? 'council' : 'mayor'))));
+  $('election-label').textContent = councilMode ? 'Voľby poslancov mesta' : 'Voľby primátora mesta';
+  document.title = `Ako volil Prešov · ${councilMode ? 'Voľby poslancov' : 'Voľby primátora'} 2026`;
+  $('mayor-views').hidden = councilMode;
+  $('council-views').hidden = !councilMode;
+  $('council-controls').hidden = !councilMode;
+  document.querySelector('[data-council-view="party"]').hidden = !COUNCIL_PARTY_VIEW_ENABLED;
+  const precincts = data.precincts.filter(p => !councilMode || !state.district || p.district === state.district);
+  $('precinct-select').innerHTML = `<option value="">${councilMode && state.district ? 'Celý obvod' : 'Všetky okrsky'}</option>` + precincts.map(p => `<option value="${p.id}">Okrsok ${p.id}</option>`).join('');
+  $('precinct-select').value = state.precinct ?? '';
+  $('coverage-text').textContent = councilMode ? state.district ? `${precincts.length} okrskov · obvod ${state.district}` : '6 obvodov · 66 okrskov' : '66 z 66 okrskov';
+  if (councilMode) {
+    $('candidate-controls').hidden = true;
+    document.querySelectorAll('[data-council-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.councilView === state.view)));
+    $('district-select').innerHTML = '<option value="">Celé mesto · vyberte obvod</option>' + council.districts.map(d => `<option value="${d.id}">${d.id}. ${escape(d.name)}</option>`).join('');
+    $('district-select').value = state.district ?? '';
+    $('council-candidate').hidden = state.view !== 'candidate';
+    $('council-candidate').disabled = !state.district;
+    $('council-candidate').innerHTML = `<option value="">${state.district ? 'Vyberte kandidáta…' : 'Najprv vyberte obvod'}</option>` + council.candidates.filter(c => c.district === state.district).sort((a, b) => b.votes - a.votes || a.ballot - b.ballot).map(c => `<option value="${c.id}">${escape(c.name)}${c.elected ? ' · zvolený' : ''}</option>`).join('');
+    $('council-candidate').value = state.candidate ?? '';
+    const subjects = scopeSubjects(council, state);
+    if (state.subject && !subjects.some(s => s.id === state.subject)) state.subject = null;
+    $('council-subject').hidden = state.view !== 'party';
+    $('council-subject').innerHTML = '<option value="">Vyberte stranu alebo koalíciu…</option>' + subjects.map(s => `<option value="${s.id}">${escape(s.name)}</option>`).join('');
+    $('council-subject').value = state.subject ?? '';
+    $('council-scale-label').hidden = neutralCouncil();
+    $('council-absolute-scale').checked = !state.relative;
+    $('point-toggle').setAttribute('aria-pressed', String(state.points));
+    return;
+  }
   document.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === state.view)));
   $('candidate-controls').hidden = state.view !== 'candidate';
   $('candidate').value = state.candidate;
@@ -175,6 +302,7 @@ function render() {
 
 function clearAddress() {
   selectedAddress = null;
+  $('address-search').value = '';
   marker?.remove();
   marker = null;
 }
@@ -182,6 +310,10 @@ function clearAddress() {
 function selectPrecinct(id, { zoom = true, mobileScroll = false, keepAddress = false } = {}) {
   if (!keepAddress) clearAddress();
   state.precinct = precinct(id)?.id ?? null;
+  if (isCouncil() && state.precinct) {
+    state.district = precinct(state.precinct).district;
+    if (state.candidate && !state.candidate.startsWith(state.district + ':')) state.candidate = null;
+  }
   render();
   const p = precinct(state.precinct);
   if (map && zoom && p) fitBounds(p.bounds, { padding: 70, maxZoom: 15.5 });
@@ -198,15 +330,50 @@ function recolorMap() {
   for (const p of data.precincts) color.push(p.id, precinctColor(p));
   color.push(UNKNOWN_COLOR);
   map.setPaintProperty('precinct-fill', 'fill-color', color);
-  map.setLayoutProperty('precinct-fill', 'visibility', state.points ? 'none' : 'visible');
+  const districtOverview = neutralCouncil() && !state.district;
+  map.setLayoutProperty('precinct-fill', 'visibility', state.points || districtOverview ? 'none' : 'visible');
   map.setLayoutProperty('unknown-fill', 'visibility', state.points ? 'none' : 'visible');
-  map.setLayoutProperty('precinct-outline', 'visibility', state.points ? 'none' : 'visible');
+  map.setLayoutProperty('precinct-outline', 'visibility', state.points || districtOverview ? 'none' : 'visible');
   map.setFilter('precinct-selected', ['==', ['get', 'precinct'], state.precinct ?? -1]);
   if (map.getLayer('address-points')) {
     map.setPaintProperty('address-points', 'circle-color', color);
     map.setLayoutProperty('address-points', 'visibility', state.points ? 'visible' : 'none');
   }
+  if (districtsGeo) {
+    addDistrictLayers();
+    map.setLayoutProperty('district-fill', 'visibility', neutralCouncil() && !state.points ? 'visible' : 'none');
+    map.setLayoutProperty('district-outline', 'visibility', isCouncil() ? 'visible' : 'none');
+    map.setPaintProperty('district-fill', 'fill-color', ['case', ['==', ['get', 'district'], state.district ?? -1], '#8ba6a7', '#c5cfcc']);
+    map.setPaintProperty('district-outline', 'line-width', ['case', ['==', ['get', 'district'], state.district ?? -1], 2, 1]);
+    syncDistrictLabels();
+  }
   popup?.remove();
+  hoveredId = null;
+}
+
+function syncDistrictLabels() {
+  for (const label of districtLabels) {
+    label.element.hidden = !neutralCouncil() || state.points || Boolean(state.district && state.district !== label.id);
+    label.element.classList.toggle('is-compact', map.getZoom() < 12.2);
+  }
+}
+
+function addDistrictLayers() {
+  if (!mapReady || !districtsGeo || map.getLayer('district-fill')) return;
+  map.addSource('districts', { type: 'geojson', data: districtsGeo });
+  map.addLayer({ id: 'district-fill', source: 'districts', type: 'fill', layout: { visibility: 'none' }, paint: { 'fill-color': '#c5cfcc', 'fill-opacity': .25 } }, 'precinct-fill');
+  map.addLayer({ id: 'district-outline', source: 'districts', type: 'line', layout: { visibility: 'none' }, paint: { 'line-color': '#506a70', 'line-width': 1, 'line-opacity': .75 } });
+  if (!districtLabels.length) districtLabels = districtsGeo.features.map(f => {
+    const element = document.createElement('button');
+    element.className = 'district-map-label';
+    element.hidden = true;
+    element.innerHTML = `<strong>Obvod ${f.properties.district}</strong><span>${escape(f.properties.name)}</span>`;
+    element.setAttribute('aria-label', `Vybrať obvod ${f.properties.district}: ${f.properties.name}`);
+    element.title = f.properties.name;
+    element.addEventListener('click', event => { event.stopPropagation(); selectDistrict(f.properties.district); });
+    const marker = new maplibre.Marker({ element }).setLngLat(f.properties.labelCoordinates).addTo(map);
+    return { id: f.properties.district, element, marker };
+  });
 }
 
 function pointsData() {
@@ -237,6 +404,16 @@ function addLayers() {
 
 function hoverHTML(p, address) {
   if (address && !address.precinct) return `<span class="hover-title">${escape(address.label)}</span>${address.number ? 'Objekt mimo volebného zoznamu adries' : 'Registračný záznam bez orientačného čísla'}`;
+  if (isCouncil()) {
+    const result = council.precincts.find(r => r.id === p.id);
+    let label = `${integer(result.validBallots)} platných lístkov pre poslancov`;
+    if (state.view === 'candidate' && state.candidate) label = state.candidate.startsWith(p.district + ':') ? `${council.candidates.find(c => c.id === state.candidate).name}: ${percent(councilValue(council, { ...state, district: null }, result))} platných lístkov` : 'Kandidát v tomto obvode nekandidoval.';
+    if (state.view === 'party' && state.subject) {
+      const r = subjectResult(council, result, state.subject);
+      label = r.nominees ? `${council.subjects.find(s => s.id === state.subject).name}: ${percent(r.share)} hlasov pre kandidátov` : 'Bez kandidátov v obvode';
+    }
+    return `<span class="hover-title">${address ? escape(address.label) + ' · ' : ''}Okrsok ${p.id} · obvod ${p.district}</span><span class="hover-metric">${escape(label)}</span><small>Kliknutím zobrazíte výsledky celého okrsku.</small>`;
+  }
   const name = candidate(p.winner)?.surname ?? (p.validVotes ? 'Remíza' : 'Bez platných hlasov');
   const label = state.view === 'candidate' ? `${candidate(state.candidate).surname}: ${percent(p.shares[state.candidate])}` : state.view === 'turnout' ? `Účasť: ${percent(p.turnout)}` : `${name}${p.winner ? ': ' + percent(p.shares[p.winner]) : ''}`;
   const margin = state.view === 'winner' ? winningMargin(p) : null;
@@ -253,7 +430,7 @@ function onMapMove(event) {
   const address = state.points ? addresses.find(a => a.id === Number(f.properties.addressId)) : null;
   const p = precinct(f.properties.precinct);
   if (!p && !address) return;
-  const hoverKey = `${state.points}:${f.id}:${state.view}:${state.candidate}`;
+  const hoverKey = `${state.election}:${state.points}:${f.id}:${state.view}:${state.candidate}:${state.subject}`;
   if (hoveredId !== hoverKey) {
     popup.setHTML(hoverHTML(p, address));
     hoveredId = hoverKey;
@@ -263,8 +440,18 @@ function onMapMove(event) {
 
 function onMapClick(event) {
   if (!mapReady) return;
+  if (neutralCouncil() && !state.points) {
+    const districtFeatures = map.queryRenderedFeatures(event.point, { layers: ['district-fill'] });
+    if (!state.district && districtFeatures.length) { selectDistrict(Number(districtFeatures[0].properties.district)); return; }
+  }
   const features = map.queryRenderedFeatures(event.point, { layers: [state.points ? 'address-points' : 'precinct-fill'] });
-  if (!features.length) return;
+  if (!features.length) {
+    if (neutralCouncil() && !state.points) {
+      const districts = map.queryRenderedFeatures(event.point, { layers: ['district-fill'] });
+      if (districts.length) selectDistrict(Number(districts[0].properties.district));
+    }
+    return;
+  }
   const f = features[0];
   if (state.points) {
     const a = addresses.find(a => a.id === Number(f.properties.addressId));
@@ -291,7 +478,7 @@ async function startMap() {
       addLayers();
       basemapApplied = map.getStyle().metadata?.presovBasemap === true;
     });
-    map.once('load', () => fitBounds(precinct(state.precinct)?.bounds ?? data.bounds));
+    map.once('load', () => fitBounds(precinct(state.precinct)?.bounds ?? (isCouncil() && state.district ? districtBounds(state.district) : data.bounds)));
     map.on('idle', () => {
       if (basemapApplied && !basemapFailed) {
         clearTimeout(basemapWatchdog);
@@ -299,10 +486,11 @@ async function startMap() {
       }
     });
     map.on('mousemove', onMapMove);
+    map.on('zoom', syncDistrictLabels);
     map.on('mouseout', () => { popup.remove(); hoveredId = null; });
     map.on('click', onMapClick);
     map.on('error', event => {
-      if (['precincts', 'unknown', 'boundary', 'addresses'].includes(event.sourceId)) return;
+      if (['precincts', 'unknown', 'boundary', 'addresses', 'districts'].includes(event.sourceId)) return;
       basemapErrors++;
       if (basemapErrors > 2) showBasemapFailure('Podkladová mapa sa nepodarila načítať. Farebné plochy, vyhľadávanie a výsledky sú stále dostupné.');
     });
@@ -380,6 +568,37 @@ function selectAddress(a, zoom = true) {
 function openMethod() { if (!$('method-dialog').open) $('method-dialog').showModal(); }
 
 function bindEvents() {
+  document.querySelectorAll('[data-election]').forEach(button => button.addEventListener('click', () => {
+    if (button.dataset.election !== (isCouncil() ? 'council' : 'mayor')) switchElection(button.dataset.election);
+  }));
+  $('retry-council').addEventListener('click', () => switchElection('council', councilRetrySearch));
+  document.querySelectorAll('[data-council-view]').forEach(button => button.addEventListener('click', () => { state.view = button.dataset.councilView; render(); }));
+  $('district-select').addEventListener('change', event => selectDistrict(event.target.value));
+  $('council-candidate').addEventListener('change', event => { state.candidate = event.target.value || null; render(); });
+  $('council-subject').addEventListener('change', event => { state.subject = event.target.value || null; render(); });
+  $('council-absolute-scale').addEventListener('change', event => { state.relative = !event.target.checked; render(); });
+  $('clear-district').addEventListener('click', () => selectDistrict(null));
+  $('council-results').addEventListener('click', event => {
+    const districtButton = event.target.closest('[data-council-district]');
+    const personButton = event.target.closest('[data-council-candidate]');
+    const subjectButton = event.target.closest('[data-council-subject]');
+    const precinctButton = event.target.closest('[data-council-precinct]');
+    if (districtButton) { selectDistrict(Number(districtButton.dataset.councilDistrict)); $('results-heading').focus({ preventScroll: !mobileLayout.matches }); }
+    else if (personButton) {
+      const c = council.candidates.find(c => c.id === personButton.dataset.councilCandidate);
+      if (!c) return;
+      if (state.district !== c.district) { clearAddress(); state.precinct = null; }
+      state.district = c.district;
+      state.candidate = c.id;
+      state.view = 'candidate';
+      render();
+      $('results-heading').focus({ preventScroll: !mobileLayout.matches });
+    } else if (subjectButton) { state.subject = subjectButton.dataset.councilSubject; state.view = 'party'; render(); $('results-heading').focus({ preventScroll: !mobileLayout.matches }); }
+    else if (precinctButton) {
+      const id = Number(precinctButton.dataset.councilPrecinct);
+      selectPrecinct(state.precinct === id ? null : id, { mobileScroll: true });
+    }
+  });
   $('legend-toggle').addEventListener('click', () => { mobileLegendOpen = !mobileLegendOpen; syncLegendDisclosure(); });
   $('legend-toggle').addEventListener('keydown', event => {
     if (event.key === 'Escape' && mobileLegendOpen) { mobileLegendOpen = false; syncLegendDisclosure(); }
@@ -407,8 +626,8 @@ function bindEvents() {
     $(id).querySelector(`[data-ranked-precinct="${precinctId}"]`).focus({ preventScroll: true });
   }));
   $('precinct-select').addEventListener('change', event => selectPrecinct(event.target.value, { mobileScroll: true }));
-  $('clear-selection').addEventListener('click', () => selectPrecinct(null, { zoom: false }));
-  $('reset-map').addEventListener('click', () => { selectPrecinct(null, { zoom: false }); $('address-search').value = ''; hideSearch(); fitBounds(data.bounds); });
+  $('clear-selection').addEventListener('click', () => { selectPrecinct(null, { zoom: false }); if (isCouncil() && state.district) fitBounds(districtBounds(state.district)); });
+  $('reset-map').addEventListener('click', () => { if (isCouncil()) selectDistrict(null, { zoom: false }); else selectPrecinct(null, { zoom: false }); $('address-search').value = ''; hideSearch(); fitBounds(data.bounds); });
   $('address-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { searchTimer = null; renderSearch(); }, 90); });
   $('address-search').addEventListener('focus', () => { if ($('address-search').value.length >= 2) renderSearch(); });
   $('address-search').addEventListener('keydown', event => {
@@ -433,7 +652,11 @@ function bindEvents() {
   ['method-open', 'sources-open'].forEach(id => $(id).addEventListener('click', openMethod));
   $('method-close').addEventListener('click', () => $('method-dialog').close());
   $('method-dialog').addEventListener('click', event => { if (event.target === $('method-dialog') && (event.offsetX < 0 || event.offsetY < 0 || event.offsetX > event.target.clientWidth || event.offsetY > event.target.clientHeight)) $('method-dialog').close(); });
-  window.addEventListener('popstate', () => { clearAddress(); state = parseState(location.search, data.candidates.map(c => c.id), data.precincts.map(p => p.id)); render(); });
+  window.addEventListener('popstate', async () => {
+    clearAddress();
+    if (new URLSearchParams(location.search).get('election') === 'council') await switchElection('council', location.search);
+    else { state = { ...parseState(location.search, data.candidates.map(c => c.id), data.precincts.map(p => p.id)), election: 'mayor' }; render(); }
+  });
   window.addEventListener('resize', () => map?.resize());
 }
 
@@ -446,12 +669,19 @@ async function start() {
   try {
     data = await json('./data/results.json');
     state = parseState(location.search, data.candidates.map(c => c.id), data.precincts.map(p => p.id));
+    state.election = 'mayor';
+    const initialCouncilSearch = new URLSearchParams(location.search).get('election') === 'council' ? location.search : null;
+    if (initialCouncilSearch !== null) {
+      try { await loadCouncil(); state = parseCouncilState(initialCouncilSearch, council); }
+      catch (error) { councilRetrySearch = initialCouncilSearch; $('council-error').hidden = false; console.error('Council data:', error); }
+    }
     $('candidate').innerHTML = [...data.candidates].sort((a, b) => b.votes - a.votes).map(c => `<option value="${c.id}">${escape(c.name)}</option>`).join('');
     $('precinct-select').insertAdjacentHTML('beforeend', data.precincts.map(p => `<option value="${p.id}">Okrsok ${p.id}</option>`).join(''));
     $('audit-summary').textContent = 'Vyhľadávanie používa priradenia z mestských údajov a oficiálneho zoznamu volebných adries. Register obsahuje aj školy, športoviská, obchody a ďalšie objekty bez samostatnej položky v tomto zozname. Ich areály sú zahrnuté do súvislých farebných plôch; nejde o chýbajúce výsledky okrskov.';
     $('snapshot-date').textContent = `Snímka zdrojových údajov: ${data.snapshotDate}. Nezávislý informačný projekt; nejde o oficiálnu volebnú aplikáciu mesta.`;
     bindEvents();
     render();
+    if (state.corrected) { toast('Neplatnú kombináciu v odkaze sme upravili. Vyberte obvod a kandidáta znova.'); state.corrected = false; }
     startMap();
     json('./data/addresses.json').then(records => {
       addresses = records.map(a => ({ ...a, searchKey: normalize(a.label) }));

@@ -23,8 +23,16 @@ createServer(async (req, res) => {
     // Local QA only: an iframe gives the app a real 390 px CSS viewport without
     // adding a test page to the published site or changing the user's browser.
     if (name === '/__qa/mobile') {
+      const query = new URL(req.url, 'http://localhost').search.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><html><head><title>Mobile QA — 390 × 844</title></head><body style="margin:0;background:#dce1df;display:flex;justify-content:center"><iframe title="Prešov mobile preview" src="/" style="width:390px;height:844px;border:0;background:white"></iframe></body></html>');
+      res.end(`<!doctype html><html><head><title>Mobile QA — 390 × 844</title></head><body style="margin:0;background:#dce1df;display:flex;justify-content:center"><iframe title="Prešov mobile preview" src="/${query}" style="width:390px;height:844px;border:0;background:white"></iframe></body></html>`);
+      return;
+    }
+    if (name === '/__qa/council-data-error') {
+      const shim = '<script>{const originalFetch=window.fetch.bind(window);let failures=2;window.fetch=(input,options)=>String(input).includes("council-results.json")&&failures-->0?Promise.resolve(new Response("Local QA failure",{status:503})):originalFetch(input,options);}</script>';
+      const html = (await readFile(resolve(root, 'index.html'), 'utf8')).replace('<head>', '<head><base href="/">' + shim);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(html);
       return;
     }
     if (name === '/__qa/no-basemap') {

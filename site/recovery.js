@@ -1,4 +1,4 @@
-export const PAGE_CONTROLS = ['absolute-scale', 'retry-basemap', 'map-status-text', 'winner-lead', 'retry-results', 'candidate-heading', 'turnout-results', 'legend-toggle', 'results-metrics', 'candidate-focus', 'candidate-comparison', 'comparison-results', 'candidate-rankings'];
+export const PAGE_CONTROLS = ['absolute-scale', 'retry-basemap', 'map-status-text', 'winner-lead', 'retry-results', 'candidate-heading', 'turnout-results', 'legend-toggle', 'results-metrics', 'candidate-focus', 'candidate-comparison', 'comparison-results', 'candidate-rankings', 'council-results', 'district-select', 'council-error'];
 
 export function compatiblePage(doc, release) {
   return PAGE_CONTROLS.every(id => doc.getElementById(id)) &&
